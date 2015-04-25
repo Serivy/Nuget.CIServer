@@ -321,6 +321,80 @@ namespace NuGet.Server.Infrastructure
             return Path.ChangeExtension(pathToNupkg, isTempFile ? NupkgTempHashExtension : NupkgHashExtension);
         }
 
+        private class PackageInfo
+        {
+            public IPackage Package { get; set; }
+            public DerivedPackageData DerivedPackageData { get; set; }
+        }
+
+        private PackageInfo GetFileData(string path, HttpContext context, bool enableDelisting)
+        {
+            OptimizedZipPackage zip = OpenPackage(path);
+
+            Debug.Assert(zip != null, "Unable to open " + path);
+            if (zip == null)
+            {
+                return null;
+            }
+            if (enableDelisting)
+            {
+                // hidden packages are considered delisted
+                zip.Listed = !File.GetAttributes(_fileSystem.GetFullPath(path)).HasFlag(FileAttributes.Hidden);
+            }
+
+            string packageHash = null;
+            long packageSize = 0;
+            string persistedHashFile = EnablePersistNupkgHash ? GetHashFile(path, false) : null;
+            bool hashComputeNeeded = true;
+
+            ReadHashFile(context, path, persistedHashFile, ref packageSize, ref packageHash, ref hashComputeNeeded);
+
+            if (hashComputeNeeded)
+            {
+                using (var stream = _fileSystem.OpenFile(path))
+                {
+                    packageSize = stream.Length;
+                    packageHash = Convert.ToBase64String(HashProvider.CalculateHash(stream));
+                }
+                WriteHashFile(context, path, persistedHashFile, packageSize, packageHash);
+            }
+
+            var data = new DerivedPackageData
+            {
+                PackageSize = packageSize,
+                PackageHash = packageHash,
+                LastUpdated = _fileSystem.GetLastModified(path),
+                Created = _fileSystem.GetCreated(path),
+                Path = path,
+                FullPath = _fileSystem.GetFullPath(path),
+
+                // default to false, these will be set later
+                IsAbsoluteLatestVersion = false,
+                IsLatestVersion = false
+            };
+
+            if (checkFrameworks)
+            {
+                data.SupportedFrameworks = zip.GetSupportedFrameworks();
+            }
+
+            var entry = new Tuple<IPackage, DerivedPackageData>(zip, data);
+
+            // find the latest versions
+            string id = zip.Id.ToLowerInvariant();
+
+            // update with the highest version
+            absoluteLatest.AddOrUpdate(id, entry, (oldId, oldEntry) => oldEntry.Item1.Version < entry.Item1.Version ? entry : oldEntry);
+
+            // update latest for release versions
+            if (zip.IsReleaseVersion())
+            {
+                latest.AddOrUpdate(id, entry, (oldId, oldEntry) => oldEntry.Item1.Version < entry.Item1.Version ? entry : oldEntry);
+            }
+
+            return new PackageInfo() {   }; 
+        }
+
         /// <summary>
         /// CreateCache loads all packages and determines additional metadata such as the hash, IsAbsoluteLatestVersion, and IsLatestVersion.
         /// </summary>
@@ -349,69 +423,6 @@ namespace NuGet.Server.Infrastructure
 
             Parallel.ForEach(packageFiles, opts, path =>
             {
-                OptimizedZipPackage zip = OpenPackage(path);
-
-                Debug.Assert(zip != null, "Unable to open " + path);
-                if (zip == null)
-                {
-                    return;
-                }
-                if (enableDelisting)
-                {
-                    // hidden packages are considered delisted
-                    zip.Listed = !File.GetAttributes(_fileSystem.GetFullPath(path)).HasFlag(FileAttributes.Hidden);
-                }
-
-                string packageHash = null;
-                long packageSize = 0;
-                string persistedHashFile = EnablePersistNupkgHash ? GetHashFile(path, false) : null;
-                bool hashComputeNeeded = true;
-
-                ReadHashFile(context, path, persistedHashFile, ref packageSize, ref packageHash, ref hashComputeNeeded);
-
-                if (hashComputeNeeded)
-                {
-                    using (var stream = _fileSystem.OpenFile(path))
-                    {
-                        packageSize = stream.Length;
-                        packageHash = Convert.ToBase64String(HashProvider.CalculateHash(stream));
-                    }
-                    WriteHashFile(context, path, persistedHashFile, packageSize, packageHash);
-                }
-
-                var data = new DerivedPackageData
-                {
-                    PackageSize = packageSize,
-                    PackageHash = packageHash,
-                    LastUpdated = _fileSystem.GetLastModified(path),
-                    Created = _fileSystem.GetCreated(path),
-                    Path = path,
-                    FullPath = _fileSystem.GetFullPath(path),
-
-                    // default to false, these will be set later
-                    IsAbsoluteLatestVersion = false,
-                    IsLatestVersion = false
-                };
-
-                if (checkFrameworks)
-                {
-                    data.SupportedFrameworks = zip.GetSupportedFrameworks();
-                }
-
-                var entry = new Tuple<IPackage, DerivedPackageData>(zip, data);
-
-                // find the latest versions
-                string id = zip.Id.ToLowerInvariant();
-
-                // update with the highest version
-                absoluteLatest.AddOrUpdate(id, entry, (oldId, oldEntry) => oldEntry.Item1.Version < entry.Item1.Version ? entry : oldEntry);
-
-                // update latest for release versions
-                if (zip.IsReleaseVersion())
-                {
-                    latest.AddOrUpdate(id, entry, (oldId, oldEntry) => oldEntry.Item1.Version < entry.Item1.Version ? entry : oldEntry);
-                }
-
                 // add the package to the cache, it should not exist already
                 Debug.Assert(packages.ContainsKey(zip) == false, "duplicate package added");
                 packages.AddOrUpdate(zip, entry.Item2, (oldPkg, oldData) => oldData);

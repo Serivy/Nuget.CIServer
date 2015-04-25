@@ -96,7 +96,6 @@
     <Content Include="Default.aspx" />
     <Content Include="favicon.ico" />
     <Content Include="DataServices\Packages.svc" />
-    <Content Include="Packages\Readme.txt" />
     <Content Include="Web.config">
       <SubType>Designer</SubType>
     </Content>
@@ -119,6 +118,7 @@
   </ItemGroup>
   <ItemGroup>
     <Folder Include="Models\" />
+    <Folder Include="Packages\" />
     <Folder Include="Properties\PublishProfiles\" />
   </ItemGroup>
   <PropertyGroup Condition=" '$(OS)' == 'Windows_NT'">
