@@ -257,6 +257,8 @@ namespace NuGet.Server.Infrastructure
             else
             {
                 var projs = projects.Split(',');
+                var paths = Path.GetDirectoryName(_fileSystem.Root);
+
                 var projectDirectories = Directory.GetDirectories(_fileSystem.Root);
                 foreach (var proj in projectDirectories)
                 {
@@ -327,7 +329,7 @@ namespace NuGet.Server.Infrastructure
             public DerivedPackageData DerivedPackageData { get; set; }
         }
 
-        private PackageInfo GetFileData(string path, HttpContext context, bool enableDelisting)
+        private PackageInfo GetFileData(string path, HttpContext context, bool enableDelisting, bool checkFrameworks)
         {
             OptimizedZipPackage zip = OpenPackage(path);
 
@@ -377,22 +379,8 @@ namespace NuGet.Server.Infrastructure
             {
                 data.SupportedFrameworks = zip.GetSupportedFrameworks();
             }
-
-            var entry = new Tuple<IPackage, DerivedPackageData>(zip, data);
-
-            // find the latest versions
-            string id = zip.Id.ToLowerInvariant();
-
-            // update with the highest version
-            absoluteLatest.AddOrUpdate(id, entry, (oldId, oldEntry) => oldEntry.Item1.Version < entry.Item1.Version ? entry : oldEntry);
-
-            // update latest for release versions
-            if (zip.IsReleaseVersion())
-            {
-                latest.AddOrUpdate(id, entry, (oldId, oldEntry) => oldEntry.Item1.Version < entry.Item1.Version ? entry : oldEntry);
-            }
-
-            return new PackageInfo() {   }; 
+            
+            return new PackageInfo() { Package = zip, DerivedPackageData = data }; 
         }
 
         /// <summary>
@@ -423,9 +411,24 @@ namespace NuGet.Server.Infrastructure
 
             Parallel.ForEach(packageFiles, opts, path =>
             {
-                // add the package to the cache, it should not exist already
-                Debug.Assert(packages.ContainsKey(zip) == false, "duplicate package added");
-                packages.AddOrUpdate(zip, entry.Item2, (oldPkg, oldData) => oldData);
+                var entryNew = GetFileData(path, context, enableDelisting, checkFrameworks);
+                //var entry = new Tuple<IPackage, DerivedPackageData>(entryNew.Package, entryNew.DerivedPackageData);
+
+                //// find the latest versions
+                //string id = entryNew.Package.Id.ToLowerInvariant();
+
+                //// update with the highest version
+                //absoluteLatest.AddOrUpdate(id, entry, (oldId, oldEntry) => oldEntry.Item1.Version < entry.Item1.Version ? entry : oldEntry);
+
+                //// update latest for release versions
+                //if (entryNew.Package.IsReleaseVersion())
+                //{
+                //    latest.AddOrUpdate(id, entry, (oldId, oldEntry) => oldEntry.Item1.Version < entry.Item1.Version ? entry : oldEntry);
+                //}
+
+                //// add the package to the cache, it should not exist already
+                //Debug.Assert(packages.ContainsKey(entryNew.Package) == false, "duplicate package added");
+                //packages.AddOrUpdate(entryNew.Package, entry.Item2, (oldPkg, oldData) => oldData);
             });
 
             // Set additional attributes after visiting all packages

@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<package>
+    <metadata minClientVersion="2.6">
+        <id>$id$Last</id>
+        <version>$version$</version>
+        <description>O.o</description>
+        <authors>Outercurve Foundation</authors>
+        <owners>Test</owners>
+        <licenseUrl>http://www.example.com</licenseUrl>
+        <projectUrl>http://www.example.com</projectUrl>
+        <copyright></copyright>
+        <frameworkAssemblies>
+        </frameworkAssemblies>
+        <dependencies>
+        </dependencies>
+        <releaseNotes></releaseNotes>
+    </metadata>
+<files>
+  <file src="Nuget.exe" target="lib" /> 
+</files>
+</package>
