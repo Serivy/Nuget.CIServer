@@ -15,6 +15,7 @@ using System.Runtime.Versioning;
 using System.Threading.Tasks;
 using System.Web.Configuration;
 using NuGet.Server.DataModel;
+using NuGet.Server.Models;
 
 namespace NuGet.Server.Infrastructure
 {
@@ -323,12 +324,6 @@ namespace NuGet.Server.Infrastructure
             return Path.ChangeExtension(pathToNupkg, isTempFile ? NupkgTempHashExtension : NupkgHashExtension);
         }
 
-        private class PackageInfo
-        {
-            public IPackage Package { get; set; }
-            public DerivedPackageData DerivedPackageData { get; set; }
-        }
-
         private PackageInfo GetFileData(string path, HttpContext context, bool enableDelisting, bool checkFrameworks)
         {
             OptimizedZipPackage zip = OpenPackage(path);
@@ -379,7 +374,9 @@ namespace NuGet.Server.Infrastructure
             {
                 data.SupportedFrameworks = zip.GetSupportedFrameworks();
             }
-            
+
+            DataStore.GetInstance().AddPackage(path, zip, data);
+
             return new PackageInfo() { Package = zip, DerivedPackageData = data }; 
         }
 
@@ -408,27 +405,58 @@ namespace NuGet.Server.Infrastructure
             // we'll get error "Collection was modified; enumeration operation may not execute."
             // So we have to materialize the IEnumerable into a list first.
             var packageFiles = GetPackageFiles().ToList();
+            var discoverFiles = new List<string>();
 
-            Parallel.ForEach(packageFiles, opts, path =>
+            var cachedPackages = DataStore.GetInstance().GetAllPackages();
+            foreach (var file in packageFiles)
+            {
+                PackageInfo entryNew;
+                if (cachedPackages.TryGetValue(file, out entryNew))
+                {
+                    var entry = new Tuple<IPackage, DerivedPackageData>(entryNew.Package, entryNew.DerivedPackageData);
+
+                    // find the latest versions
+                    string id = entryNew.Package.Id.ToLowerInvariant();
+
+                    // update with the highest version
+                    absoluteLatest.AddOrUpdate(id, entry, (oldId, oldEntry) => oldEntry.Item1.Version < entry.Item1.Version ? entry : oldEntry);
+
+                    // update latest for release versions
+                    if (entryNew.Package.IsReleaseVersion())
+                    {
+                        latest.AddOrUpdate(id, entry, (oldId, oldEntry) => oldEntry.Item1.Version < entry.Item1.Version ? entry : oldEntry);
+                    }
+
+                    // add the package to the cache, it should not exist already
+                    Debug.Assert(packages.ContainsKey(entryNew.Package) == false, "duplicate package added");
+                    packages.AddOrUpdate(entryNew.Package, entry.Item2, (oldPkg, oldData) => oldData);
+                }
+                else
+                {
+                    discoverFiles.Add(file);
+                }
+            }
+
+            Parallel.ForEach(discoverFiles, opts, path =>
             {
                 var entryNew = GetFileData(path, context, enableDelisting, checkFrameworks);
-                //var entry = new Tuple<IPackage, DerivedPackageData>(entryNew.Package, entryNew.DerivedPackageData);
+                var entry = new Tuple<IPackage, DerivedPackageData>(entryNew.Package, entryNew.DerivedPackageData);
 
-                //// find the latest versions
-                //string id = entryNew.Package.Id.ToLowerInvariant();
+                // find the latest versions
+                string id = entryNew.Package.Id.ToLowerInvariant();
 
-                //// update with the highest version
-                //absoluteLatest.AddOrUpdate(id, entry, (oldId, oldEntry) => oldEntry.Item1.Version < entry.Item1.Version ? entry : oldEntry);
+                // update with the highest version
+                absoluteLatest.AddOrUpdate(id, entry, (oldId, oldEntry) => oldEntry.Item1.Version < entry.Item1.Version ? entry : oldEntry);
 
-                //// update latest for release versions
-                //if (entryNew.Package.IsReleaseVersion())
-                //{
-                //    latest.AddOrUpdate(id, entry, (oldId, oldEntry) => oldEntry.Item1.Version < entry.Item1.Version ? entry : oldEntry);
-                //}
+                // update latest for release versions
+                if (entryNew.Package.IsReleaseVersion())
+                {
+                    latest.AddOrUpdate(id, entry, (oldId, oldEntry) => oldEntry.Item1.Version < entry.Item1.Version ? entry : oldEntry);
+                }
 
-                //// add the package to the cache, it should not exist already
-                //Debug.Assert(packages.ContainsKey(entryNew.Package) == false, "duplicate package added");
-                //packages.AddOrUpdate(entryNew.Package, entry.Item2, (oldPkg, oldData) => oldData);
+                // add the package to the cache, it should not exist already
+                Debug.Assert(packages.ContainsKey(entryNew.Package) == false, "duplicate package added");
+                packages.AddOrUpdate(entryNew.Package, entry.Item2, (oldPkg, oldData) => oldData);
             });
 
             // Set additional attributes after visiting all packages

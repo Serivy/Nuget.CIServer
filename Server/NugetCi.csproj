@@ -60,14 +60,18 @@
     </Reference>
     <Reference Include="System.Web" />
     <Reference Include="System.Configuration" />
+    <Reference Include="System.Web.Extensions" />
     <Reference Include="WebActivatorEx">
       <HintPath>..\packages\WebActivatorEx.2.0.2\lib\net40\WebActivatorEx.dll</HintPath>
     </Reference>
     <Reference Include="WindowsBase" />
   </ItemGroup>
   <ItemGroup>
-    <Content Include="DataModel\Package.Pop.sql" />
+    <EmbeddedResource Include="DataModel\Package.Pop.sql" />
     <Compile Include="DataModel\DataStore.cs" />
+    <Compile Include="Models\PackageInfo.cs" />
+    <Compile Include="Models\PackageModel.cs" />
+    <Compile Include="ObjectExtensions.cs" />
     <Compile Include="Properties\CommonAssemblyInfo.cs" />
     <Compile Include="DataServices\Package.cs" />
     <Compile Include="DataServices\PackageContext.cs" />
@@ -109,7 +113,6 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="DataServices\Routes.cs" />
-    <None Include="Properties\NuGet.Server.nuspec" />
   </ItemGroup>
   <ItemGroup>
     <Content Include="packages.config">
@@ -117,7 +120,6 @@
     </Content>
   </ItemGroup>
   <ItemGroup>
-    <Folder Include="Models\" />
     <Folder Include="Packages\" />
     <Folder Include="Properties\PublishProfiles\" />
   </ItemGroup>

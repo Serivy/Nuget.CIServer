@@ -1,16 +1,19 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Data.SqlClient;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Web.Script.Serialization;
 using Dapper;
 using NuGet.Server.Infrastructure;
+using NuGet.Server.Models;
 
 namespace NuGet.Server.DataModel
 {
     public class DataStore
     {
-        public static DataStore instance;
+        private static DataStore instance;
         public string ConnectionString;
 
         public DataStore()
@@ -57,6 +60,16 @@ namespace NuGet.Server.DataModel
 
         }
 
+        public static DataStore GetInstance()
+        {
+            if (instance == null)
+            {
+                instance = new DataStore();
+            }
+
+            return instance;
+        }
+
         public object GetPackage(string filename)
         {
             using (var conn = GetConnection())
@@ -64,6 +77,58 @@ namespace NuGet.Server.DataModel
                 conn.Open();
                 var package = conn.Query<DerivedPackageData>("Select * from Package where [File] = " + filename).First();
                 return package;
+            }
+        }
+
+        public Dictionary<string, PackageInfo> GetAllPackages()
+        {
+            var jss = new JavaScriptSerializer();
+
+            var packages = new Dictionary<string, PackageInfo>();
+            using (var conn = GetConnection())
+            {
+                conn.Open();
+                var queried = conn.Query("Select Id, Package, DerivedPackageData from Package");
+                //.Select(o => new Tuple<string, object, object>(o.Id, o.Package, o.DerivedPackageData));
+                //.Select(o => new { Id = o.Id, Package = o.Package, DerivedPackageData = o.DerivedPackageData });
+
+                foreach (var q in queried)
+                {
+                    var info = (Dictionary<string, object>)jss.DeserializeObject(q.Package);
+                    var pm = info.ToObject<PackageModel>();
+                    //packages.Add(q.Id, new PackageInfo() { Package = jss.Deserialize<PackageModel>(q.Package), DerivedPackageData = jss.Deserialize<DerivedPackageData>(q.DerivedPackageData) });
+                }
+            }
+
+            return packages;
+        }
+
+        public class Package
+        {
+            private string Id;
+            private string Zip;
+            private string Data;
+        }
+
+        public void AddPackage(string filename, object zip, object data)
+        {
+            var json = new JavaScriptSerializer();
+            var zipj = json.Serialize(zip);
+            var dataj = json.Serialize(data);
+
+            using (var conn = GetConnection())
+            {
+                try
+                {
+                    conn.Open();
+                    conn.Execute("Delete Package Where Id = '" + filename +"'");
+                    var query = string.Format("Insert into Package (Id, Package, DerivedPackageData) select '{0}', '{1}', '{2}'", filename, zipj, dataj);
+                    conn.Execute(query);
+                }
+                catch (Exception e)
+                {
+                    
+                }
             }
         }
 
