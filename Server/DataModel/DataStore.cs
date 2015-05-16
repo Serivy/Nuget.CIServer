@@ -82,22 +82,29 @@ namespace NuGet.Server.DataModel
 
         public Dictionary<string, PackageInfo> GetAllPackages()
         {
-            var jss = new JavaScriptSerializer();
-
             var packages = new Dictionary<string, PackageInfo>();
-            using (var conn = GetConnection())
+            try
             {
-                conn.Open();
-                var queried = conn.Query("Select Id, Package, DerivedPackageData from Package");
-                //.Select(o => new Tuple<string, object, object>(o.Id, o.Package, o.DerivedPackageData));
-                //.Select(o => new { Id = o.Id, Package = o.Package, DerivedPackageData = o.DerivedPackageData });
+                var jss = new JavaScriptSerializer();
 
-                foreach (var q in queried)
+                using (var conn = GetConnection())
                 {
-                    var info = (Dictionary<string, object>)jss.DeserializeObject(q.Package);
-                    var pm = info.ToObject<PackageModel>();
-                    //packages.Add(q.Id, new PackageInfo() { Package = jss.Deserialize<PackageModel>(q.Package), DerivedPackageData = jss.Deserialize<DerivedPackageData>(q.DerivedPackageData) });
+                    conn.Open();
+                    var queried = conn.Query("Select Id, Package, DerivedPackageData from Package");
+                    //.Select(o => new Tuple<string, object, object>(o.Id, o.Package, o.DerivedPackageData));
+                    //.Select(o => new { Id = o.Id, Package = o.Package, DerivedPackageData = o.DerivedPackageData });
+
+                    foreach (var q in queried)
+                    {
+                        var info = (Dictionary<string, object>) jss.DeserializeObject(q.Package);
+                        var pm = info.ToObject<PackageModel>();
+                        //packages.Add(q.Id, new PackageInfo() { Package = jss.Deserialize<PackageModel>(q.Package), DerivedPackageData = jss.Deserialize<DerivedPackageData>(q.DerivedPackageData) });
+                    }
                 }
+            }
+            catch (Exception)
+            {
+                RepairDatabase();
             }
 
             return packages;
@@ -127,7 +134,8 @@ namespace NuGet.Server.DataModel
                 }
                 catch (Exception e)
                 {
-                    
+                    RepairDatabase();
+                    throw e;
                 }
             }
         }
@@ -143,6 +151,15 @@ namespace NuGet.Server.DataModel
         {
             var conn = new SqlConnection(ConnectionString);
             return conn;
+        }
+
+        private void RepairDatabase()
+        {
+            using (var conn = GetConnection())
+            {
+                conn.Query("if OBJECT_ID('dbo.Package') is null begin Drop table dbo.Package end");
+            }
+            EnsureDatabaseLatest();
         }
 
         private void EnsureDatabaseLatest()
