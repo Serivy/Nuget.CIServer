@@ -69,6 +69,7 @@
   <ItemGroup>
     <EmbeddedResource Include="DataModel\Package.Pop.sql" />
     <Compile Include="DataModel\DataStore.cs" />
+    <Compile Include="Models\PackageJavaScriptConverter.cs" />
     <Compile Include="Models\PackageInfo.cs" />
     <Compile Include="Models\PackageModel.cs" />
     <Compile Include="ObjectExtensions.cs" />

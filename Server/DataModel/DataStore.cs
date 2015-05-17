@@ -86,6 +86,7 @@ namespace NuGet.Server.DataModel
             try
             {
                 var jss = new JavaScriptSerializer();
+                jss.RegisterConverters(new [] { new PackageJavaScriptConverter() });
 
                 using (var conn = GetConnection())
                 {
@@ -96,9 +97,15 @@ namespace NuGet.Server.DataModel
 
                     foreach (var q in queried)
                     {
-                        var info = (Dictionary<string, object>) jss.DeserializeObject(q.Package);
-                        var pm = info.ToObject<PackageModel>();
-                        //packages.Add(q.Id, new PackageInfo() { Package = jss.Deserialize<PackageModel>(q.Package), DerivedPackageData = jss.Deserialize<DerivedPackageData>(q.DerivedPackageData) });
+                        var info = jss.Deserialize<PackageModel>(q.Package);
+                        var additional = jss.Deserialize<DerivedPackageData>(q.DerivedPackageData);
+
+                        ////serialzer.RegisterConverters(new[] { new DataObjectJavaScriptConverter() });
+                        ////var dataObj = serializer.Deserialize<DataObject>(json);
+
+                        //var info = (Dictionary<string, object>) jss.DeserializeObject(q.Package);
+                        //var pm = info.ToObject<PackageModel>();
+                        packages.Add(q.Id, new PackageInfo() { Package = info, DerivedPackageData = additional });
                     }
                 }
             }
