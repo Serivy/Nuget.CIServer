@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Configuration;
 using System.Data.SqlClient;
 using System.IO;
 using System.Linq;
@@ -18,6 +19,18 @@ namespace NuGet.Server.DataModel
 
         public DataStore()
         {
+            // Setup the database.
+            var conn = ConfigurationManager.ConnectionStrings["Database"].ConnectionString;
+            var connection = new SqlConnectionStringBuilder(conn);
+
+            connection.InitialCatalog = !string.IsNullOrEmpty(connection.InitialCatalog) ? connection.InitialCatalog : "OpenNuget";
+            connection.DataSource = connection.DataSource ?? "(localdb)\\v11.0";
+            ConnectionString = connection.ToString();
+
+            EnsureDatabaseExists(ConnectionString);
+
+            return;
+
             //new FileInfo(Assembly.GetEntryAssembly().Location).Directory;
             var targetDb = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "NugetCi", "Cache.mdf");
             var file = new FileInfo(targetDb);
@@ -58,6 +71,31 @@ namespace NuGet.Server.DataModel
 
             EnsureDatabaseLatest();
 
+        }
+
+        private void EnsureDatabaseExists(string connnectionString)
+        {
+            try
+            {
+                using (var conn = new SqlConnection(connnectionString))
+                {
+                    conn.Open();
+                }
+            }
+            catch (Exception ex)
+            {
+                // Datastore may not exist, try create it.
+                var masterDB = new SqlConnectionStringBuilder(connnectionString);
+                var dataStore = masterDB.InitialCatalog;
+                masterDB.InitialCatalog = "master";
+                using (var conn = new SqlConnection(masterDB.ToString()))
+                {
+                    conn.Open();
+                    conn.Execute(string.Format("CREATE DATABASE {0}", dataStore));
+                }
+            }
+
+            EnsureDatabaseLatest();
         }
 
         public static DataStore GetInstance()
@@ -164,7 +202,7 @@ namespace NuGet.Server.DataModel
         {
             using (var conn = GetConnection())
             {
-                conn.Query("if OBJECT_ID('dbo.Package') is null begin Drop table dbo.Package end");
+                conn.Query("if OBJECT_ID('dbo.Package') is not null begin Drop table dbo.Package end");
             }
             EnsureDatabaseLatest();
         }

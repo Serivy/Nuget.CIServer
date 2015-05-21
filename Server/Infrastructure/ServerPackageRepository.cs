@@ -105,6 +105,7 @@ namespace NuGet.Server.Infrastructure
                 metadata = new Package(package, data);
             }
 
+            // Todo: Figure out why sometimes this returns null when the package cant be retrieved (usualy during updates to the drop location).
             return metadata;
         }
 
@@ -440,6 +441,11 @@ namespace NuGet.Server.Infrastructure
             Parallel.ForEach(discoverFiles, opts, path =>
             {
                 var entryNew = GetFileData(path, context, enableDelisting, checkFrameworks);
+                if (entryNew == null)
+                {
+                    // Can be null if the package failed to open if it was in use.
+                    return;
+                }
                 var entry = new Tuple<IPackage, DerivedPackageData>(entryNew.Package, entryNew.DerivedPackageData);
 
                 // find the latest versions
@@ -554,7 +560,13 @@ namespace NuGet.Server.Infrastructure
                 }
                 catch (FileFormatException ex)
                 {
-                    throw new InvalidDataException(String.Format(CultureInfo.CurrentCulture, NuGetResources.ErrorReadingPackage, path), ex);
+                    throw new InvalidDataException(
+                        String.Format(CultureInfo.CurrentCulture, NuGetResources.ErrorReadingPackage, path), ex);
+                }
+                catch (IOException)
+                {
+                    // Probably because its currently being copied. ignore it this time.
+                    return null;
                 }
                 // Set the last modified date on the package
                 zip.Published = _fileSystem.GetLastModified(path);

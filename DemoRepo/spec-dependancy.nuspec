@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<package>
+    <metadata minClientVersion="2.6">
+        <id>$id$Dependant</id>
+        <version>$version$</version>
+        <description>O.o</description>
+        <authors>Outercurve Foundation</authors>
+        <owners>Test</owners>
+        <licenseUrl>http://www.example.com</licenseUrl>
+        <projectUrl>http://www.example.com</projectUrl>
+        <copyright></copyright>
+        <frameworkAssemblies>
+            <frameworkAssembly assemblyName="System.ServiceModel" targetFramework="net40" />
+        </frameworkAssemblies>
+        <dependencies>
+            <dependency id="RouteMagic" version="1.1.0" />
+        </dependencies>
+        <references>
+            <reference file="ClassLibrary.dll" />
+        </references>
+        <releaseNotes></releaseNotes>
+    </metadata>
+<files>
+  <file src="ClassLibrary.pdb" target="lib\net40" /> 
+  <file src="ClassLibrary.dll" target="lib\net40" /> 
+</files>
+</package>
