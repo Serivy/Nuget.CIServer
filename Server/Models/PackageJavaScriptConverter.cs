@@ -121,7 +121,18 @@ namespace NuGet.Server.Models
 
         public override IDictionary<string, object> Serialize(object obj, JavaScriptSerializer serializer)
         {
-            var dataObj = obj as PackageModel;
+            if (obj is IPackageAssemblyReference)
+            {
+                var dataObj = obj as IPackageAssemblyReference;
+                return new Dictionary<string, object>
+                {
+                    //{"SourcePath", dataObj},
+                    //{"TargetPath", dataObj.DetailLevel}
+                };
+            }
+
+            return null;
+
             //if (dataObj != null)
             //{
             //    return new Dictionary<string, object>

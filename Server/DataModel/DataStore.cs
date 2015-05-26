@@ -155,16 +155,10 @@ namespace NuGet.Server.DataModel
             return packages;
         }
 
-        public class Package
-        {
-            private string Id;
-            private string Zip;
-            private string Data;
-        }
-
         public void AddPackage(string filename, object zip, object data)
         {
             var json = new JavaScriptSerializer();
+            json.RegisterConverters(new[] { new PackageJavaScriptConverter() });
             var zipj = json.Serialize(zip);
             var dataj = json.Serialize(data);
 

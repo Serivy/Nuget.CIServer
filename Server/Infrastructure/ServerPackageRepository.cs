@@ -27,7 +27,6 @@ namespace NuGet.Server.Infrastructure
     public class ServerPackageRepository : PackageRepositoryBase, IServerPackageRepository, IPackageLookup, IDisposable
     {
         private IDictionary<IPackage, DerivedPackageData> _packages;
-        private DataStore _store = new DataStore();
         private readonly object _lockObj = new object();
         private readonly IFileSystem _fileSystem;
         private readonly IPackagePathResolver _pathResolver;
@@ -329,7 +328,7 @@ namespace NuGet.Server.Infrastructure
         {
             OptimizedZipPackage zip = OpenPackage(path);
 
-            Debug.Assert(zip != null, "Unable to open " + path);
+            //Debug.Assert(zip != null, "Unable to open " + path);
             if (zip == null)
             {
                 return null;
@@ -566,6 +565,11 @@ namespace NuGet.Server.Infrastructure
                 catch (IOException)
                 {
                     // Probably because its currently being copied. ignore it this time.
+                    return null;
+                }
+                catch (InvalidOperationException)
+                {
+                    // May be a broken nuget file. Should probably clean it up here.
                     return null;
                 }
                 // Set the last modified date on the package
