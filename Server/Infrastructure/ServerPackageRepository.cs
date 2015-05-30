@@ -12,6 +12,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.Versioning;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Web.Configuration;
 using NuGet.Server.DataModel;
@@ -34,8 +35,6 @@ namespace NuGet.Server.Infrastructure
         private FileSystemWatcher _fileWatcher;
         private readonly string _filter = String.Format(CultureInfo.InvariantCulture, "*{0}", Constants.PackageExtension);
         private bool _monitoringFiles = false;
-        private const string NupkgHashExtension = ".hash";
-        private const string NupkgTempHashExtension = ".thash";
 
         public ServerPackageRepository(string path)
             : this(new DefaultPackagePathResolver(path), new PhysicalFileSystem(path))
@@ -208,11 +207,6 @@ namespace NuGet.Server.Infrastructure
                     else
                     {
                         _fileSystem.DeleteFile(fileName);
-                        if (EnablePersistNupkgHash)
-                        {
-                            _fileSystem.DeleteFile(GetHashFile(fileName, false));
-                            _fileSystem.DeleteFile(GetHashFile(fileName, true));
-                        }
                     }
 
                     InvalidatePackages();
@@ -246,19 +240,28 @@ namespace NuGet.Server.Infrastructure
         /// </summary>
         private IEnumerable<string> GetPackageFiles()
         {
+            var filter = FolderFilter;
             var projects = ConfigurationManager.AppSettings["projects"];
+            Regex regex = null;
+            if (!string.IsNullOrEmpty(filter))
+            {
+                regex = new Regex(filter);
+            }
+
             if (string.IsNullOrEmpty(projects))
             {
                 // Check top level directory
                 foreach (var path in _fileSystem.GetFiles(String.Empty, _filter, true))
                 {
-                    yield return path;
+                    if (string.IsNullOrEmpty(filter) || regex != null && regex.IsMatch(path))
+                    {
+                        yield return path;
+                    }
                 }
             }
             else
             {
                 var projs = projects.Split(',');
-                var paths = Path.GetDirectoryName(_fileSystem.Root);
 
                 var projectDirectories = Directory.GetDirectories(_fileSystem.Root);
                 foreach (var proj in projectDirectories)
@@ -268,7 +271,10 @@ namespace NuGet.Server.Infrastructure
                     {
                         foreach (var path in Directory.GetFiles(directory.FullName, _filter, SearchOption.AllDirectories))
                         {
-                            yield return path;
+                            if (string.IsNullOrEmpty(filter) || regex.IsMatch(path))
+                            {
+                                yield return path;
+                            }
                         }
                     }
                 }
@@ -313,17 +319,6 @@ namespace NuGet.Server.Infrastructure
             }
         }
 
-        private string GetHashFile(string pathToNupkg, bool isTempFile)
-        {
-            // path_to_nupkg\package.nupkg => path_to_nupkg\package.hash or path_to_nupkg\package.thash
-            // reason for replacing extension instead of appending: elimination potential file-system file name length limits.
-            if (string.IsNullOrEmpty(pathToNupkg))
-            {
-                return pathToNupkg;
-            }
-            return Path.ChangeExtension(pathToNupkg, isTempFile ? NupkgTempHashExtension : NupkgHashExtension);
-        }
-
         private PackageInfo GetFileData(string path, HttpContext context, bool enableDelisting, bool checkFrameworks)
         {
             OptimizedZipPackage zip = OpenPackage(path);
@@ -339,21 +334,13 @@ namespace NuGet.Server.Infrastructure
                 zip.Listed = !File.GetAttributes(_fileSystem.GetFullPath(path)).HasFlag(FileAttributes.Hidden);
             }
 
-            string packageHash = null;
+            string packageHash = string.Empty;
             long packageSize = 0;
-            string persistedHashFile = EnablePersistNupkgHash ? GetHashFile(path, false) : null;
-            bool hashComputeNeeded = true;
 
-            ReadHashFile(context, path, persistedHashFile, ref packageSize, ref packageHash, ref hashComputeNeeded);
-
-            if (hashComputeNeeded)
+            using (var stream = _fileSystem.OpenFile(path))
             {
-                using (var stream = _fileSystem.OpenFile(path))
-                {
-                    packageSize = stream.Length;
-                    packageHash = Convert.ToBase64String(HashProvider.CalculateHash(stream));
-                }
-                WriteHashFile(context, path, persistedHashFile, packageSize, packageHash);
+                packageSize = stream.Length;
+                packageHash = Convert.ToBase64String(HashProvider.CalculateHash(stream));
             }
 
             var data = new DerivedPackageData
@@ -411,7 +398,8 @@ namespace NuGet.Server.Infrastructure
             foreach (var file in packageFiles)
             {
                 PackageInfo entryNew;
-                if (cachedPackages.TryGetValue(file, out entryNew))
+                var fileInfo = new FileInfo(file);
+                if (cachedPackages.TryGetValue(fileInfo.Name, out entryNew))
                 {
                     var entry = new Tuple<IPackage, DerivedPackageData>(entryNew.Package, entryNew.DerivedPackageData);
 
@@ -476,63 +464,6 @@ namespace NuGet.Server.Infrastructure
             }
 
             return packages;
-        }
-
-        private void WriteHashFile(HttpContext context, string nupkgPath, string hashFilePath, long packageSize, string packageHash)
-        {
-            if (hashFilePath == null)
-            {
-                return; // feature not enabled.
-            }
-            try
-            {
-                var tempHashFilePath = GetHashFile(nupkgPath, true);
-                _fileSystem.DeleteFile(tempHashFilePath);
-                _fileSystem.DeleteFile(hashFilePath);
-
-                var content = new StringBuilder();
-                content.AppendLine(packageSize.ToString(CultureInfo.InvariantCulture));
-                content.AppendLine(packageHash);
-
-                using (var stream = new MemoryStream(Encoding.ASCII.GetBytes(content.ToString())))
-                {
-                    _fileSystem.AddFile(tempHashFilePath, stream);
-                }
-                // move temp file to official location when previous operation completed successfully to minimize impact of potential errors (ex: machine crash in the middle of saving the file).
-                _fileSystem.MoveFile(tempHashFilePath, hashFilePath);
-            }
-            catch (Exception e)
-            {
-                // Hashing persistence is a perf optimization feature; we chose to degrade perf over degrading functionality in case of failure.
-                Log(context, string.Format("Unable to create hash file '{0}'.", hashFilePath), e);
-            }
-        }
-
-        private void ReadHashFile(HttpContext context, string nupkgPath, string hashFilePath, ref long packageSize, ref string packageHash, ref bool hashComputeNeeded)
-        {
-            if (hashFilePath == null)
-            {
-                return; // feature not enabled.
-            }
-            try
-            {
-                if (!_fileSystem.FileExists(hashFilePath) || _fileSystem.GetLastModified(hashFilePath) < _fileSystem.GetLastModified(nupkgPath))
-                {
-                    return; // hash does not exist or is not current.
-                }
-                using (var stream = _fileSystem.OpenFile(hashFilePath))
-                {
-                    var reader = new StreamReader(stream);
-                    packageSize = long.Parse(reader.ReadLine(), CultureInfo.InvariantCulture);
-                    packageHash = reader.ReadLine();
-                }
-                hashComputeNeeded = false;
-            }
-            catch (Exception e)
-            {
-                // Hashing persistence is a perf optimization feature; we chose to degrade perf over degrading functionality in case of failure.
-                Log(context, string.Format("Unable to read hash file '{0}'.", hashFilePath), e);
-            }
         }
 
         private static void Log(HttpContext context, string message, Exception innerException)
@@ -648,12 +579,11 @@ namespace NuGet.Server.Infrastructure
             }
         }
 
-        private bool EnablePersistNupkgHash
+        private string FolderFilter
         {
             get
             {
-                // If the setting is misconfigured, treat it as off (backwards compatibility).
-                return _getSetting("enablePersistNupkgHash", false);
+                return GetStringAppSetting("folderFilter");
             }
         }
 
@@ -662,6 +592,12 @@ namespace NuGet.Server.Infrastructure
             var appSettings = WebConfigurationManager.AppSettings;
             bool value;
             return !Boolean.TryParse(appSettings[key], out value) ? defaultValue : value;
+        }
+
+        private static string GetStringAppSetting(string key)
+        {
+            var appSettings = WebConfigurationManager.AppSettings;
+            return appSettings[key];
         }
     }
 }
