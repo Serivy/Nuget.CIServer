@@ -386,6 +386,7 @@ namespace NuGet.Server.Infrastructure
             // get settings
             bool checkFrameworks = EnableFrameworkFiltering;
             bool enableDelisting = EnableDelisting;
+            var ignoreHash = IgnoreHash;
             // we need to save the current context because it's stored in TLS and we're computing hashes on different threads.
             var context = HttpContext.Current;
 
@@ -455,20 +456,24 @@ namespace NuGet.Server.Infrastructure
             timeStamps.Add(string.Format("Package opening for {0} files", discoverFiles.Count()), timer.Elapsed);
 
             // Calculate Hashes.
-            timer.Restart();
-            var hashlessFiles = packages.Where(o => o.Value.PackageSize < 1).ToArray();
-            Parallel.ForEach(hashlessFiles, opts, package =>
-            {
-                using (var stream = _fileSystem.OpenFile(package.Value.FullPath))
-                {
-                    package.Value.PackageSize = stream.Length;
-                    package.Value.PackageHash = Convert.ToBase64String(HashProvider.CalculateHash(stream));
-                }
-                DataStore.GetInstance().UpdatePackageHashes(package.Value.FullPath, package.Key, package.Value);
-            });
-            timer.Stop();
-            timeStamps.Add(string.Format("Hash calculations for {0} files", hashlessFiles.Length), timer.Elapsed);
 
+            if (!ignoreHash)
+            {
+                timer.Restart();
+                var hashlessFiles = packages.Where(o => o.Value.PackageSize < 1).ToArray();
+                Parallel.ForEach(hashlessFiles, opts, package =>
+                {
+                    using (var stream = _fileSystem.OpenFile(package.Value.FullPath))
+                    {
+                        package.Value.PackageSize = stream.Length;
+                        package.Value.PackageHash = Convert.ToBase64String(HashProvider.CalculateHash(stream));
+                    }
+                    DataStore.GetInstance().UpdatePackageHashes(package.Value.FullPath, package.Key, package.Value);
+                });
+                timer.Stop();
+                timeStamps.Add(string.Format("Hash calculations for {0} files", hashlessFiles.Length), timer.Elapsed); 
+            }
+            
             // Set additional attributes after visiting all packages
             foreach (var entry in absoluteLatest.Values)
             {
@@ -588,6 +593,14 @@ namespace NuGet.Server.Infrastructure
             {
                 // If the setting is misconfigured, treat it as off (backwards compatibility).
                 return _getSetting("enableFrameworkFiltering", false);
+            }
+        }
+
+        private bool IgnoreHash
+        {
+            get
+            {
+                return _getSetting("ignoreHash", false);
             }
         }
 
