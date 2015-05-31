@@ -179,6 +179,31 @@ namespace NuGet.Server.DataModel
             }
         }
 
+        public void UpdatePackageHashes(string filename, object zip, object data)
+        {
+            AddPackage(filename, zip, data);
+        }
+
+        public void CleanupPackages(Dictionary<string, PackageInfo> obsoletePackages)
+        {
+            using (var conn = GetConnection())
+            {
+                try
+                {
+                    conn.Open();
+                    foreach (var package in obsoletePackages)
+                    {
+                        conn.Execute("Delete Package Where Id = '" + package.Key + "'");
+                    }
+                }
+                catch (Exception e)
+                {
+                    RepairDatabase();
+                    throw e;
+                }
+            }
+        }
+
         private void ExecuteCommand(string text, SqlConnection conn = null)
         {
             var cmd = conn.CreateCommand();

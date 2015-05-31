@@ -15,6 +15,7 @@ using System.Runtime.Versioning;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Web.Configuration;
+using Elmah;
 using NuGet.Server.DataModel;
 using NuGet.Server.Models;
 
@@ -35,6 +36,11 @@ namespace NuGet.Server.Infrastructure
         private FileSystemWatcher _fileWatcher;
         private readonly string _filter = String.Format(CultureInfo.InvariantCulture, "*{0}", Constants.PackageExtension);
         private bool _monitoringFiles = false;
+
+        private TimeSpan databaseQueryTime;
+        private TimeSpan packageOpeningTime;
+        private TimeSpan hashGeneratingTime;
+        private TimeSpan derivedPackageDataTime;
 
         public ServerPackageRepository(string path)
             : this(new DefaultPackagePathResolver(path), new PhysicalFileSystem(path))
@@ -301,6 +307,8 @@ namespace NuGet.Server.Infrastructure
                         }
 
                         _packages = CreateCache();
+
+                        //Elmah.ErrorSignal.FromCurrentContext().Raise(); .FromContext(context).Raise(new Exception(message, innerException));
                     }
 
                     return _packages;
@@ -334,19 +342,11 @@ namespace NuGet.Server.Infrastructure
                 zip.Listed = !File.GetAttributes(_fileSystem.GetFullPath(path)).HasFlag(FileAttributes.Hidden);
             }
 
-            string packageHash = string.Empty;
-            long packageSize = 0;
-
-            using (var stream = _fileSystem.OpenFile(path))
-            {
-                packageSize = stream.Length;
-                packageHash = Convert.ToBase64String(HashProvider.CalculateHash(stream));
-            }
 
             var data = new DerivedPackageData
             {
-                PackageSize = packageSize,
-                PackageHash = packageHash,
+                //PackageSize = packageSize,
+                //PackageHash = packageHash,
                 LastUpdated = _fileSystem.GetLastModified(path),
                 Created = _fileSystem.GetCreated(path),
                 Path = path,
@@ -377,6 +377,9 @@ namespace NuGet.Server.Infrastructure
             ParallelOptions opts = new ParallelOptions();
             opts.MaxDegreeOfParallelism = 4;
 
+            var timeStamps = new Dictionary<string, TimeSpan>();
+            var timer = new Stopwatch();
+
             ConcurrentDictionary<string, Tuple<IPackage, DerivedPackageData>> absoluteLatest = new ConcurrentDictionary<string, Tuple<IPackage, DerivedPackageData>>();
             ConcurrentDictionary<string, Tuple<IPackage, DerivedPackageData>> latest = new ConcurrentDictionary<string, Tuple<IPackage, DerivedPackageData>>();
 
@@ -394,6 +397,28 @@ namespace NuGet.Server.Infrastructure
             var packageFiles = GetPackageFiles().ToList();
             var discoverFiles = new List<string>();
 
+            Action<Tuple<IPackage, DerivedPackageData>> addToPackage = delegate(Tuple<IPackage, DerivedPackageData> entry)
+            {
+                var newPackage = entry.Item1;
+                // find the latest versions
+                string id = newPackage.Id.ToLowerInvariant();
+
+                // update with the highest version
+                absoluteLatest.AddOrUpdate(id, entry, (oldId, oldEntry) => oldEntry.Item1.Version < entry.Item1.Version ? entry : oldEntry);
+
+                // update latest for release versions
+                if (entry.Item1.IsReleaseVersion())
+                {
+                    latest.AddOrUpdate(id, entry, (oldId, oldEntry) => oldEntry.Item1.Version < entry.Item1.Version ? entry : oldEntry);
+                }
+
+                // add the package to the cache, it should not exist already
+                Debug.Assert(packages.ContainsKey(entry.Item1) == false, "duplicate package added");
+                packages.AddOrUpdate(entry.Item1, entry.Item2, (oldPkg, oldData) => oldData);
+            };
+
+            // Load the caches for files.
+            timer.Restart();
             var cachedPackages = DataStore.GetInstance().GetAllPackages();
             foreach (var file in packageFiles)
             {
@@ -401,30 +426,20 @@ namespace NuGet.Server.Infrastructure
                 var fileInfo = new FileInfo(file);
                 if (cachedPackages.TryGetValue(fileInfo.Name, out entryNew))
                 {
+                    cachedPackages.Remove(fileInfo.Name);
                     var entry = new Tuple<IPackage, DerivedPackageData>(entryNew.Package, entryNew.DerivedPackageData);
-
-                    // find the latest versions
-                    string id = entryNew.Package.Id.ToLowerInvariant();
-
-                    // update with the highest version
-                    absoluteLatest.AddOrUpdate(id, entry, (oldId, oldEntry) => oldEntry.Item1.Version < entry.Item1.Version ? entry : oldEntry);
-
-                    // update latest for release versions
-                    if (entryNew.Package.IsReleaseVersion())
-                    {
-                        latest.AddOrUpdate(id, entry, (oldId, oldEntry) => oldEntry.Item1.Version < entry.Item1.Version ? entry : oldEntry);
-                    }
-
-                    // add the package to the cache, it should not exist already
-                    Debug.Assert(packages.ContainsKey(entryNew.Package) == false, "duplicate package added");
-                    packages.AddOrUpdate(entryNew.Package, entry.Item2, (oldPkg, oldData) => oldData);
+                    addToPackage(entry);
                 }
                 else
                 {
                     discoverFiles.Add(file);
                 }
             }
+            timer.Stop();
+            timeStamps.Add(string.Format("Database parsing for {0} files", cachedPackages.Count()), timer.Elapsed);
 
+            // Open packages for items that are not in the database.
+            timer.Restart();
             Parallel.ForEach(discoverFiles, opts, path =>
             {
                 var entryNew = GetFileData(path, context, enableDelisting, checkFrameworks);
@@ -434,23 +449,25 @@ namespace NuGet.Server.Infrastructure
                     return;
                 }
                 var entry = new Tuple<IPackage, DerivedPackageData>(entryNew.Package, entryNew.DerivedPackageData);
-
-                // find the latest versions
-                string id = entryNew.Package.Id.ToLowerInvariant();
-
-                // update with the highest version
-                absoluteLatest.AddOrUpdate(id, entry, (oldId, oldEntry) => oldEntry.Item1.Version < entry.Item1.Version ? entry : oldEntry);
-
-                // update latest for release versions
-                if (entryNew.Package.IsReleaseVersion())
-                {
-                    latest.AddOrUpdate(id, entry, (oldId, oldEntry) => oldEntry.Item1.Version < entry.Item1.Version ? entry : oldEntry);
-                }
-
-                // add the package to the cache, it should not exist already
-                Debug.Assert(packages.ContainsKey(entryNew.Package) == false, "duplicate package added");
-                packages.AddOrUpdate(entryNew.Package, entry.Item2, (oldPkg, oldData) => oldData);
+                addToPackage(entry);
             });
+            timer.Stop();
+            timeStamps.Add(string.Format("Package opening for {0} files", discoverFiles.Count()), timer.Elapsed);
+
+            // Calculate Hashes.
+            timer.Restart();
+            var hashlessFiles = packages.Where(o => o.Value.PackageSize < 1).ToArray();
+            Parallel.ForEach(hashlessFiles, opts, package =>
+            {
+                using (var stream = _fileSystem.OpenFile(package.Value.FullPath))
+                {
+                    package.Value.PackageSize = stream.Length;
+                    package.Value.PackageHash = Convert.ToBase64String(HashProvider.CalculateHash(stream));
+                }
+                DataStore.GetInstance().UpdatePackageHashes(package.Value.FullPath, package.Key, package.Value);
+            });
+            timer.Stop();
+            timeStamps.Add(string.Format("Hash calculations for {0} files", hashlessFiles.Length), timer.Elapsed);
 
             // Set additional attributes after visiting all packages
             foreach (var entry in absoluteLatest.Values)
@@ -463,19 +480,14 @@ namespace NuGet.Server.Infrastructure
                 entry.Item2.IsLatestVersion = true;
             }
 
-            return packages;
-        }
+            //packages.GroupBy(o => o.Key.Id,).Select(o => )
 
-        private static void Log(HttpContext context, string message, Exception innerException)
-        {
-            try
-            {
-                // Elmah.ErrorSignal.FromContext(context).Raise(new Exception(message, innerException));                
-            }
-            catch
-            {
-                // best effort
-            }
+            var message = string.Format("{0}{1}", "Cache Loaded => ", string.Join(", ", timeStamps.Select(o => o.Key + ": " + o.Value.TotalMilliseconds)));
+            ErrorSignal.FromCurrentContext().Raise(new Exception(message, new NotSupportedException()));
+
+            DataStore.GetInstance().CleanupPackages(cachedPackages);
+
+            return packages;
         }
 
         private OptimizedZipPackage OpenPackage(string path)
