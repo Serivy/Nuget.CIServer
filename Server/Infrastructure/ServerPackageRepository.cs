@@ -12,8 +12,10 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.Versioning;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Web.Configuration;
+using Elmah;
 using NuGet.Server.DataModel;
 using NuGet.Server.Models;
 
@@ -27,7 +29,6 @@ namespace NuGet.Server.Infrastructure
     public class ServerPackageRepository : PackageRepositoryBase, IServerPackageRepository, IPackageLookup, IDisposable
     {
         private IDictionary<IPackage, DerivedPackageData> _packages;
-        private DataStore _store = new DataStore();
         private readonly object _lockObj = new object();
         private readonly IFileSystem _fileSystem;
         private readonly IPackagePathResolver _pathResolver;
@@ -35,8 +36,11 @@ namespace NuGet.Server.Infrastructure
         private FileSystemWatcher _fileWatcher;
         private readonly string _filter = String.Format(CultureInfo.InvariantCulture, "*{0}", Constants.PackageExtension);
         private bool _monitoringFiles = false;
-        private const string NupkgHashExtension = ".hash";
-        private const string NupkgTempHashExtension = ".thash";
+
+        private TimeSpan databaseQueryTime;
+        private TimeSpan packageOpeningTime;
+        private TimeSpan hashGeneratingTime;
+        private TimeSpan derivedPackageDataTime;
 
         public ServerPackageRepository(string path)
             : this(new DefaultPackagePathResolver(path), new PhysicalFileSystem(path))
@@ -209,11 +213,6 @@ namespace NuGet.Server.Infrastructure
                     else
                     {
                         _fileSystem.DeleteFile(fileName);
-                        if (EnablePersistNupkgHash)
-                        {
-                            _fileSystem.DeleteFile(GetHashFile(fileName, false));
-                            _fileSystem.DeleteFile(GetHashFile(fileName, true));
-                        }
                     }
 
                     InvalidatePackages();
@@ -247,19 +246,28 @@ namespace NuGet.Server.Infrastructure
         /// </summary>
         private IEnumerable<string> GetPackageFiles()
         {
+            var filter = FolderFilter;
             var projects = ConfigurationManager.AppSettings["projects"];
+            Regex regex = null;
+            if (!string.IsNullOrEmpty(filter))
+            {
+                regex = new Regex(filter);
+            }
+
             if (string.IsNullOrEmpty(projects))
             {
                 // Check top level directory
                 foreach (var path in _fileSystem.GetFiles(String.Empty, _filter, true))
                 {
-                    yield return path;
+                    if (string.IsNullOrEmpty(filter) || regex != null && regex.IsMatch(path))
+                    {
+                        yield return path;
+                    }
                 }
             }
             else
             {
                 var projs = projects.Split(',');
-                var paths = Path.GetDirectoryName(_fileSystem.Root);
 
                 var projectDirectories = Directory.GetDirectories(_fileSystem.Root);
                 foreach (var proj in projectDirectories)
@@ -269,7 +277,10 @@ namespace NuGet.Server.Infrastructure
                     {
                         foreach (var path in Directory.GetFiles(directory.FullName, _filter, SearchOption.AllDirectories))
                         {
-                            yield return path;
+                            if (string.IsNullOrEmpty(filter) || regex.IsMatch(path))
+                            {
+                                yield return path;
+                            }
                         }
                     }
                 }
@@ -296,6 +307,8 @@ namespace NuGet.Server.Infrastructure
                         }
 
                         _packages = CreateCache();
+
+                        //Elmah.ErrorSignal.FromCurrentContext().Raise(); .FromContext(context).Raise(new Exception(message, innerException));
                     }
 
                     return _packages;
@@ -314,22 +327,11 @@ namespace NuGet.Server.Infrastructure
             }
         }
 
-        private string GetHashFile(string pathToNupkg, bool isTempFile)
-        {
-            // path_to_nupkg\package.nupkg => path_to_nupkg\package.hash or path_to_nupkg\package.thash
-            // reason for replacing extension instead of appending: elimination potential file-system file name length limits.
-            if (string.IsNullOrEmpty(pathToNupkg))
-            {
-                return pathToNupkg;
-            }
-            return Path.ChangeExtension(pathToNupkg, isTempFile ? NupkgTempHashExtension : NupkgHashExtension);
-        }
-
         private PackageInfo GetFileData(string path, HttpContext context, bool enableDelisting, bool checkFrameworks)
         {
             OptimizedZipPackage zip = OpenPackage(path);
 
-            Debug.Assert(zip != null, "Unable to open " + path);
+            //Debug.Assert(zip != null, "Unable to open " + path);
             if (zip == null)
             {
                 return null;
@@ -340,27 +342,11 @@ namespace NuGet.Server.Infrastructure
                 zip.Listed = !File.GetAttributes(_fileSystem.GetFullPath(path)).HasFlag(FileAttributes.Hidden);
             }
 
-            string packageHash = null;
-            long packageSize = 0;
-            string persistedHashFile = EnablePersistNupkgHash ? GetHashFile(path, false) : null;
-            bool hashComputeNeeded = true;
-
-            ReadHashFile(context, path, persistedHashFile, ref packageSize, ref packageHash, ref hashComputeNeeded);
-
-            if (hashComputeNeeded)
-            {
-                using (var stream = _fileSystem.OpenFile(path))
-                {
-                    packageSize = stream.Length;
-                    packageHash = Convert.ToBase64String(HashProvider.CalculateHash(stream));
-                }
-                WriteHashFile(context, path, persistedHashFile, packageSize, packageHash);
-            }
 
             var data = new DerivedPackageData
             {
-                PackageSize = packageSize,
-                PackageHash = packageHash,
+                //PackageSize = packageSize,
+                //PackageHash = packageHash,
                 LastUpdated = _fileSystem.GetLastModified(path),
                 Created = _fileSystem.GetCreated(path),
                 Path = path,
@@ -391,6 +377,9 @@ namespace NuGet.Server.Infrastructure
             ParallelOptions opts = new ParallelOptions();
             opts.MaxDegreeOfParallelism = 4;
 
+            var timeStamps = new Dictionary<string, TimeSpan>();
+            var timer = new Stopwatch();
+
             ConcurrentDictionary<string, Tuple<IPackage, DerivedPackageData>> absoluteLatest = new ConcurrentDictionary<string, Tuple<IPackage, DerivedPackageData>>();
             ConcurrentDictionary<string, Tuple<IPackage, DerivedPackageData>> latest = new ConcurrentDictionary<string, Tuple<IPackage, DerivedPackageData>>();
 
@@ -408,36 +397,49 @@ namespace NuGet.Server.Infrastructure
             var packageFiles = GetPackageFiles().ToList();
             var discoverFiles = new List<string>();
 
+            Action<Tuple<IPackage, DerivedPackageData>> addToPackage = delegate(Tuple<IPackage, DerivedPackageData> entry)
+            {
+                var newPackage = entry.Item1;
+                // find the latest versions
+                string id = newPackage.Id.ToLowerInvariant();
+
+                // update with the highest version
+                absoluteLatest.AddOrUpdate(id, entry, (oldId, oldEntry) => oldEntry.Item1.Version < entry.Item1.Version ? entry : oldEntry);
+
+                // update latest for release versions
+                if (entry.Item1.IsReleaseVersion())
+                {
+                    latest.AddOrUpdate(id, entry, (oldId, oldEntry) => oldEntry.Item1.Version < entry.Item1.Version ? entry : oldEntry);
+                }
+
+                // add the package to the cache, it should not exist already
+                Debug.Assert(packages.ContainsKey(entry.Item1) == false, "duplicate package added");
+                packages.AddOrUpdate(entry.Item1, entry.Item2, (oldPkg, oldData) => oldData);
+            };
+
+            // Load the caches for files.
+            timer.Restart();
             var cachedPackages = DataStore.GetInstance().GetAllPackages();
             foreach (var file in packageFiles)
             {
                 PackageInfo entryNew;
-                if (cachedPackages.TryGetValue(file, out entryNew))
+                var fileInfo = new FileInfo(file);
+                if (cachedPackages.TryGetValue(fileInfo.Name, out entryNew))
                 {
+                    cachedPackages.Remove(fileInfo.Name);
                     var entry = new Tuple<IPackage, DerivedPackageData>(entryNew.Package, entryNew.DerivedPackageData);
-
-                    // find the latest versions
-                    string id = entryNew.Package.Id.ToLowerInvariant();
-
-                    // update with the highest version
-                    absoluteLatest.AddOrUpdate(id, entry, (oldId, oldEntry) => oldEntry.Item1.Version < entry.Item1.Version ? entry : oldEntry);
-
-                    // update latest for release versions
-                    if (entryNew.Package.IsReleaseVersion())
-                    {
-                        latest.AddOrUpdate(id, entry, (oldId, oldEntry) => oldEntry.Item1.Version < entry.Item1.Version ? entry : oldEntry);
-                    }
-
-                    // add the package to the cache, it should not exist already
-                    Debug.Assert(packages.ContainsKey(entryNew.Package) == false, "duplicate package added");
-                    packages.AddOrUpdate(entryNew.Package, entry.Item2, (oldPkg, oldData) => oldData);
+                    addToPackage(entry);
                 }
                 else
                 {
                     discoverFiles.Add(file);
                 }
             }
+            timer.Stop();
+            timeStamps.Add(string.Format("Database parsing for {0} files", cachedPackages.Count()), timer.Elapsed);
 
+            // Open packages for items that are not in the database.
+            timer.Restart();
             Parallel.ForEach(discoverFiles, opts, path =>
             {
                 var entryNew = GetFileData(path, context, enableDelisting, checkFrameworks);
@@ -447,23 +449,25 @@ namespace NuGet.Server.Infrastructure
                     return;
                 }
                 var entry = new Tuple<IPackage, DerivedPackageData>(entryNew.Package, entryNew.DerivedPackageData);
-
-                // find the latest versions
-                string id = entryNew.Package.Id.ToLowerInvariant();
-
-                // update with the highest version
-                absoluteLatest.AddOrUpdate(id, entry, (oldId, oldEntry) => oldEntry.Item1.Version < entry.Item1.Version ? entry : oldEntry);
-
-                // update latest for release versions
-                if (entryNew.Package.IsReleaseVersion())
-                {
-                    latest.AddOrUpdate(id, entry, (oldId, oldEntry) => oldEntry.Item1.Version < entry.Item1.Version ? entry : oldEntry);
-                }
-
-                // add the package to the cache, it should not exist already
-                Debug.Assert(packages.ContainsKey(entryNew.Package) == false, "duplicate package added");
-                packages.AddOrUpdate(entryNew.Package, entry.Item2, (oldPkg, oldData) => oldData);
+                addToPackage(entry);
             });
+            timer.Stop();
+            timeStamps.Add(string.Format("Package opening for {0} files", discoverFiles.Count()), timer.Elapsed);
+
+            // Calculate Hashes.
+            timer.Restart();
+            var hashlessFiles = packages.Where(o => o.Value.PackageSize < 1).ToArray();
+            Parallel.ForEach(hashlessFiles, opts, package =>
+            {
+                using (var stream = _fileSystem.OpenFile(package.Value.FullPath))
+                {
+                    package.Value.PackageSize = stream.Length;
+                    package.Value.PackageHash = Convert.ToBase64String(HashProvider.CalculateHash(stream));
+                }
+                DataStore.GetInstance().UpdatePackageHashes(package.Value.FullPath, package.Key, package.Value);
+            });
+            timer.Stop();
+            timeStamps.Add(string.Format("Hash calculations for {0} files", hashlessFiles.Length), timer.Elapsed);
 
             // Set additional attributes after visiting all packages
             foreach (var entry in absoluteLatest.Values)
@@ -476,76 +480,14 @@ namespace NuGet.Server.Infrastructure
                 entry.Item2.IsLatestVersion = true;
             }
 
+            //packages.GroupBy(o => o.Key.Id,).Select(o => )
+
+            var message = string.Format("{0}{1}", "Cache Loaded => ", string.Join(", ", timeStamps.Select(o => o.Key + ": " + o.Value.TotalMilliseconds)));
+            ErrorSignal.FromCurrentContext().Raise(new Exception(message, new NotSupportedException()));
+
+            DataStore.GetInstance().CleanupPackages(cachedPackages);
+
             return packages;
-        }
-
-        private void WriteHashFile(HttpContext context, string nupkgPath, string hashFilePath, long packageSize, string packageHash)
-        {
-            if (hashFilePath == null)
-            {
-                return; // feature not enabled.
-            }
-            try
-            {
-                var tempHashFilePath = GetHashFile(nupkgPath, true);
-                _fileSystem.DeleteFile(tempHashFilePath);
-                _fileSystem.DeleteFile(hashFilePath);
-
-                var content = new StringBuilder();
-                content.AppendLine(packageSize.ToString(CultureInfo.InvariantCulture));
-                content.AppendLine(packageHash);
-
-                using (var stream = new MemoryStream(Encoding.ASCII.GetBytes(content.ToString())))
-                {
-                    _fileSystem.AddFile(tempHashFilePath, stream);
-                }
-                // move temp file to official location when previous operation completed successfully to minimize impact of potential errors (ex: machine crash in the middle of saving the file).
-                _fileSystem.MoveFile(tempHashFilePath, hashFilePath);
-            }
-            catch (Exception e)
-            {
-                // Hashing persistence is a perf optimization feature; we chose to degrade perf over degrading functionality in case of failure.
-                Log(context, string.Format("Unable to create hash file '{0}'.", hashFilePath), e);
-            }
-        }
-
-        private void ReadHashFile(HttpContext context, string nupkgPath, string hashFilePath, ref long packageSize, ref string packageHash, ref bool hashComputeNeeded)
-        {
-            if (hashFilePath == null)
-            {
-                return; // feature not enabled.
-            }
-            try
-            {
-                if (!_fileSystem.FileExists(hashFilePath) || _fileSystem.GetLastModified(hashFilePath) < _fileSystem.GetLastModified(nupkgPath))
-                {
-                    return; // hash does not exist or is not current.
-                }
-                using (var stream = _fileSystem.OpenFile(hashFilePath))
-                {
-                    var reader = new StreamReader(stream);
-                    packageSize = long.Parse(reader.ReadLine(), CultureInfo.InvariantCulture);
-                    packageHash = reader.ReadLine();
-                }
-                hashComputeNeeded = false;
-            }
-            catch (Exception e)
-            {
-                // Hashing persistence is a perf optimization feature; we chose to degrade perf over degrading functionality in case of failure.
-                Log(context, string.Format("Unable to read hash file '{0}'.", hashFilePath), e);
-            }
-        }
-
-        private static void Log(HttpContext context, string message, Exception innerException)
-        {
-            try
-            {
-                // Elmah.ErrorSignal.FromContext(context).Raise(new Exception(message, innerException));                
-            }
-            catch
-            {
-                // best effort
-            }
         }
 
         private OptimizedZipPackage OpenPackage(string path)
@@ -566,6 +508,11 @@ namespace NuGet.Server.Infrastructure
                 catch (IOException)
                 {
                     // Probably because its currently being copied. ignore it this time.
+                    return null;
+                }
+                catch (InvalidOperationException)
+                {
+                    // May be a broken nuget file. Should probably clean it up here.
                     return null;
                 }
                 // Set the last modified date on the package
@@ -644,12 +591,11 @@ namespace NuGet.Server.Infrastructure
             }
         }
 
-        private bool EnablePersistNupkgHash
+        private string FolderFilter
         {
             get
             {
-                // If the setting is misconfigured, treat it as off (backwards compatibility).
-                return _getSetting("enablePersistNupkgHash", false);
+                return GetStringAppSetting("folderFilter");
             }
         }
 
@@ -658,6 +604,12 @@ namespace NuGet.Server.Infrastructure
             var appSettings = WebConfigurationManager.AppSettings;
             bool value;
             return !Boolean.TryParse(appSettings[key], out value) ? defaultValue : value;
+        }
+
+        private static string GetStringAppSetting(string key)
+        {
+            var appSettings = WebConfigurationManager.AppSettings;
+            return appSettings[key];
         }
     }
 }

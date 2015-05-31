@@ -17,5 +17,7 @@
     </metadata>
 <files>
   <file src="Nuget.exe" target="lib" /> 
+  <file src="..\..\50mbfile" target="lib" /> 
+
 </files>
 </package>

@@ -69,6 +69,7 @@
   <ItemGroup>
     <EmbeddedResource Include="DataModel\Package.Pop.sql" />
     <Compile Include="DataModel\DataStore.cs" />
+    <Compile Include="Models\PackageJavaScriptSerializer.cs" />
     <Compile Include="Models\PackageJavaScriptConverter.cs" />
     <Compile Include="Models\PackageInfo.cs" />
     <Compile Include="Models\PackageModel.cs" />
@@ -98,6 +99,7 @@
   </ItemGroup>
   <ItemGroup>
     <Content Include="App_Readme\Elmah.txt" />
+    <EmbeddedResource Include="DataModel\DropCache.sql" />
     <Content Include="Default.aspx" />
     <Content Include="favicon.ico" />
     <Content Include="DataServices\Packages.svc" />
@@ -123,6 +125,7 @@
   <ItemGroup>
     <Folder Include="Packages\" />
     <Folder Include="Properties\PublishProfiles\" />
+    <Folder Include="Repository\" />
   </ItemGroup>
   <PropertyGroup Condition=" '$(OS)' == 'Windows_NT'">
     <VSToolsPath Condition="'$(VSToolsPath)' == ''">$(MSBuildExtensionsPath32)\Microsoft\VisualStudio\v$(VisualStudioVersion)</VSToolsPath>

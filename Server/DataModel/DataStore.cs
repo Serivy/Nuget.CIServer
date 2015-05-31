@@ -138,7 +138,6 @@ namespace NuGet.Server.DataModel
                         var info = jss.Deserialize<PackageModel>(q.Package);
                         var additional = jss.Deserialize<DerivedPackageData>(q.DerivedPackageData);
 
-                        ////serialzer.RegisterConverters(new[] { new DataObjectJavaScriptConverter() });
                         ////var dataObj = serializer.Deserialize<DataObject>(json);
 
                         //var info = (Dictionary<string, object>) jss.DeserializeObject(q.Package);
@@ -155,27 +154,47 @@ namespace NuGet.Server.DataModel
             return packages;
         }
 
-        public class Package
-        {
-            private string Id;
-            private string Zip;
-            private string Data;
-        }
-
         public void AddPackage(string filename, object zip, object data)
         {
             var json = new JavaScriptSerializer();
+            json.RegisterConverters(new[] { new PackageJavaScriptSerializer() });
             var zipj = json.Serialize(zip);
             var dataj = json.Serialize(data);
+            var fileInfo = new FileInfo(filename);
 
             using (var conn = GetConnection())
             {
                 try
                 {
                     conn.Open();
-                    conn.Execute("Delete Package Where Id = '" + filename +"'");
-                    var query = string.Format("Insert into Package (Id, Package, DerivedPackageData) select '{0}', '{1}', '{2}'", filename, zipj, dataj);
+                    conn.Execute("Delete Package Where Id = '" + fileInfo.Name + "'");
+                    var query = string.Format("Insert into Package (Id, Package, DerivedPackageData) select '{0}', '{1}', '{2}'", fileInfo.Name, zipj, dataj);
                     conn.Execute(query);
+                }
+                catch (Exception e)
+                {
+                    RepairDatabase();
+                    throw e;
+                }
+            }
+        }
+
+        public void UpdatePackageHashes(string filename, object zip, object data)
+        {
+            AddPackage(filename, zip, data);
+        }
+
+        public void CleanupPackages(Dictionary<string, PackageInfo> obsoletePackages)
+        {
+            using (var conn = GetConnection())
+            {
+                try
+                {
+                    conn.Open();
+                    foreach (var package in obsoletePackages)
+                    {
+                        conn.Execute("Delete Package Where Id = '" + package.Key + "'");
+                    }
                 }
                 catch (Exception e)
                 {
@@ -209,7 +228,6 @@ namespace NuGet.Server.DataModel
 
         private void EnsureDatabaseLatest()
         {
-
             using (var conn = GetConnection())
             {
                 conn.Open();

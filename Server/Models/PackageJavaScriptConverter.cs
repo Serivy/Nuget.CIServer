@@ -2,6 +2,7 @@
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using System.Runtime.Versioning;
 using System.Web.Script.Serialization;
 
@@ -37,8 +38,7 @@ namespace NuGet.Server.Models
             }
             else if (type == typeof(SemanticVersion))
             {
-                var version = (Version)Deserialize((IDictionary<string, object>)dictionary["Version"], typeof(Version), serializer);
-                return new SemanticVersion(version, dictionary["SpecialVersion"].ToString());
+                return new SemanticVersion(dictionary["SemanticVersion"].ToString());
             }
             else if (type == typeof(PackageDependencySet))
             {
@@ -121,16 +121,12 @@ namespace NuGet.Server.Models
 
         public override IDictionary<string, object> Serialize(object obj, JavaScriptSerializer serializer)
         {
-            var dataObj = obj as PackageModel;
-            //if (dataObj != null)
-            //{
-            //    return new Dictionary<string, object>
-            //    {
-            //        {"user_id", dataObj.UserId},
-            //        {"detail_level", dataObj.DetailLevel}
-            //    };
-            //}
-            return new Dictionary<string, object>();
+            var flags = BindingFlags.DeclaredOnly | BindingFlags.Public | BindingFlags.Instance;
+            return obj.GetType().GetProperties(flags).ToDictionary
+            (
+                propInfo => propInfo.Name,
+                propInfo => propInfo.GetValue(obj, null)
+            );
         }
     }
 }
